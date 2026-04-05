@@ -41,8 +41,9 @@ except ImportError:
 #  Constants
 # ─────────────────────────────────────────────────────────────────────────────
 OCR_KEYWORDS   = {"AMBULANCE", "ECNALUBMA", "AMBUL", "ANCE"}
-WHITE_THRESH   = 0.25   # fraction of frame that must be white-ish
-COLOR_THRESH   = 0.03   # fraction of frame with red/blue emergency colors
+WHITE_THRESH   = 0.10   # fraction of frame that must be white
+YELLOW_THRESH  = 0.01   # fraction of frame with yellow (ambulance-specific)
+RED_THRESH     = 0.02   # fraction of frame with red
 CONFIRM_FRAMES = 3      # consecutive positive frames to confirm detection
 CLEAR_FRAMES   = 5      # consecutive negative frames to clear detection (prevents flickering)
 
@@ -55,45 +56,59 @@ def _ocr_has_ambulance(frame_bgr: np.ndarray) -> bool:
     """Return True if OCR finds AMBULANCE / ECNALUBMA text in the frame."""
     if not TESS_AVAILABLE:
         return False
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    pil_img = Image.fromarray(thresh)
-    text = pytesseract.image_to_string(pil_img, config='--psm 6').upper()
-    return any(kw in text for kw in OCR_KEYWORDS)
+    try:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        pil_img = Image.fromarray(thresh)
+        text = pytesseract.image_to_string(pil_img, config='--psm 6').upper()
+        return any(kw in text for kw in OCR_KEYWORDS)
+    except Exception as e:
+        # Tesseract warnings/errors – fall back to color detection
+        return False
 
 
 def _color_has_ambulance(frame_bgr: np.ndarray) -> bool:
     """
-    Return True if the frame contains a large white area combined with
-    red or blue emergency-light colors.
+    Return True if the frame contains the characteristic ambulance color pattern:
+    white + red + yellow (not just any red/blue).
     """
     hsv   = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     total = frame_bgr.shape[0] * frame_bgr.shape[1]
 
-    # White mask
+    # White mask (bright, low saturation)
     white_mask = cv2.inRange(hsv,
                              np.array([0,   0, 180]),
-                             np.array([180, 50, 255]))
+                             np.array([180, 40, 255]))
     white_ratio = cv2.countNonZero(white_mask) / total
 
     # Red mask (two hue ranges)
-    red1 = cv2.inRange(hsv, np.array([0,  120,  70]), np.array([10, 255, 255]))
-    red2 = cv2.inRange(hsv, np.array([160, 120, 70]), np.array([180, 255, 255]))
+    red1 = cv2.inRange(hsv, np.array([0,  80,  70]), np.array([10, 255, 255]))
+    red2 = cv2.inRange(hsv, np.array([165, 80, 70]), np.array([180, 255, 255]))
     red_mask  = cv2.bitwise_or(red1, red2)
+    red_ratio = cv2.countNonZero(red_mask) / total
 
-    # Blue mask
-    blue_mask = cv2.inRange(hsv, np.array([100, 120, 70]), np.array([130, 255, 255]))
+    # Yellow mask (ambulance roof)
+    yellow_mask = cv2.inRange(hsv, np.array([15, 80, 70]), np.array([35, 255, 255]))
+    yellow_ratio = cv2.countNonZero(yellow_mask) / total
 
-    color_ratio = (cv2.countNonZero(red_mask) +
-                   cv2.countNonZero(blue_mask)) / total
+    # Require white + red + yellow together (ambulance pattern)
+    has_white = white_ratio > WHITE_THRESH
+    has_red = red_ratio > RED_THRESH
+    has_yellow = yellow_ratio > YELLOW_THRESH
 
-    return white_ratio > WHITE_THRESH and color_ratio > COLOR_THRESH
+
+    return has_white and has_red and has_yellow
 
 
 def _analyse_frame(frame_bgr: np.ndarray) -> bool:
-    """Run both detectors; either positive result counts."""
+    """
+    Run both detectors:
+    - OCR text alone is enough (strong signal: "AMBULANCE" text found)
+    - OR require strict color pattern (white + red + yellow together)
+    """
     ocr   = _ocr_has_ambulance(frame_bgr)
     color = _color_has_ambulance(frame_bgr)
+
     return ocr or color
 
 
@@ -140,7 +155,7 @@ class AmbulanceDetector:
         self._sim_elapsed   = 0.0
 
         mode = "SIMULATION" if self.simulation else f"camera #{camera_index}"
-        print(f"[CameraDetector:{self.lane}] Initialised ({mode})")
+        print(f"[CameraDetector:{self.lane}] [INIT] Initialised ({mode})")
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -150,13 +165,13 @@ class AmbulanceDetector:
         self._thread = threading.Thread(target=target, daemon=True,
                                         name=f"cam-{self.lane}")
         self._thread.start()
-        print(f"[CameraDetector:{self.lane}] ▶  Started")
+        print(f"[CameraDetector:{self.lane}] [START] Started")
 
     def stop(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        print(f"[CameraDetector:{self.lane}] ■  Stopped")
+        print(f"[CameraDetector:{self.lane}] [STOP] Stopped")
 
     @property
     def ambulance_detected(self) -> bool:
@@ -182,7 +197,7 @@ class AmbulanceDetector:
         if newly_det != self._detected:
             self._detected = newly_det
             self.callback(self.lane, self._detected)
-            icon = "🚑 AMBULANCE SPOTTED" if self._detected else "✅ Clear"
+            icon = "[AMBULANCE] SPOTTED" if self._detected else "[OK] Clear"
             print(f"[CameraDetector:{self.lane}] {icon}")
 
     def trigger_sim_ambulance(self, duration: float = None):
@@ -196,7 +211,7 @@ class AmbulanceDetector:
         self._sim_active   = True
         self._sim_duration = duration if duration is not None else random.uniform(8, 15)
         self._sim_elapsed  = 0.0
-        print(f"[CameraDetector:{self.lane}] 📸 Ambulance triggered by siren "
+        print(f"[CameraDetector:{self.lane}] [CAM] Ambulance triggered by siren "
               f"(duration={self._sim_duration:.1f}s)")
 
     # ── Live camera loop ──────────────────────────────────────────────────
@@ -206,11 +221,11 @@ class AmbulanceDetector:
         cap = cv2.VideoCapture(self.camera_index)
         if not cap.isOpened():
             if self.camera_index != 0:
-                print(f"[CameraDetector:{self.lane}] ⚠  Camera #{self.camera_index} not found – "
+                print(f"[CameraDetector:{self.lane}] [!] Camera #{self.camera_index} not found - "
                       "sharing camera 0 (single-webcam mode)")
                 cap = cv2.VideoCapture(0)
             if not cap.isOpened():
-                print(f"[CameraDetector:{self.lane}] ⚠  Cannot open any camera – "
+                print(f"[CameraDetector:{self.lane}] [!] Cannot open any camera - "
                       "switching to simulation")
                 self.simulation = True
                 self._sim_loop()
@@ -238,7 +253,7 @@ class AmbulanceDetector:
                     self._sim_active   = True
                     self._sim_duration = random.uniform(6, 18)
                     self._sim_elapsed  = 0.0
-                    print(f"[CameraDetector:{self.lane}] 📸 Sim ambulance appearing "
+                    print(f"[CameraDetector:{self.lane}] [CAM] Sim ambulance appearing "
                           f"(duration={self._sim_duration:.1f}s)")
 
             if self._sim_active:
@@ -247,7 +262,7 @@ class AmbulanceDetector:
                 if self._sim_elapsed >= self._sim_duration:
                     self._sim_active = False
                     positive = False
-                    print(f"[CameraDetector:{self.lane}] 📸 Sim ambulance left")
+                    print(f"[CameraDetector:{self.lane}] [CAM] Sim ambulance left")
             else:
                 positive = False
 

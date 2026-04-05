@@ -84,14 +84,14 @@ class TrafficController:
         self._thread  = threading.Thread(target=self._loop, daemon=True,
                                          name="traffic-ctrl")
         self._thread.start()
-        print("[TrafficController] ▶  Running")
+        print("[TrafficController] >  Running")
 
     def stop(self):
         """Stop the controller."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5)
-        print("[TrafficController] ■  Stopped")
+        print("[TrafficController] []  Stopped")
 
     def set_siren(self, active: bool):
         """Called by SirenDetector when siren state changes.
@@ -118,7 +118,7 @@ class TrafficController:
                     )
                     chosen = amb_lane or green_lane or LANES[0]
                     self._emergency_lane = chosen
-                    print(f"[TrafficController] 🚨 Siren detected → EMERGENCY on {chosen}")
+                    print(f"[TrafficController] [ALERT] Siren detected -> EMERGENCY on {chosen}")
             else:
                 # Siren gone: clear siren-only emergency (camera-confirmed emergencies stay)
                 if self._emergency_lane:
@@ -130,9 +130,9 @@ class TrafficController:
                         )
                         self._emergency_lane = other
                         if other is None:
-                            print("[TrafficController] ✅ Siren gone, emergency cleared")
+                            print("[TrafficController] [OK] Siren gone, emergency cleared")
 
-        status = "🚨 SIREN ON" if active else "🔇 Siren off"
+        status = "[ALERT] SIREN ON" if active else "[QUIET] Siren off"
         print(f"[TrafficController] {status}")
 
     def set_ambulance(self, lane: str, detected: bool):
@@ -143,7 +143,7 @@ class TrafficController:
             self.lanes[lane].ambulance_here = detected
             if detected:
                 self._emergency_lane = lane
-                print(f"[TrafficController] 🚑 EMERGENCY → forcing GREEN on {lane}")
+                print(f"[TrafficController] [AMBULANCE] EMERGENCY -> forcing GREEN on {lane}")
             else:
                 # Clear emergency only if no other lane has an ambulance
                 if self._emergency_lane == lane:
@@ -153,7 +153,7 @@ class TrafficController:
                     )
                     self._emergency_lane = other
                     if other is None:
-                        print("[TrafficController] ✅ Emergency cleared – resuming normal")
+                        print("[TrafficController] [OK] Emergency cleared - resuming normal")
 
     def get_state(self) -> Dict[str, dict]:
         """Return a snapshot of current light states."""

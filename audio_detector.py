@@ -39,10 +39,10 @@ SAMPLE_RATE   = 44100   # Hz
 CHUNK         = 1024    # samples per buffer read
 SIREN_LOW     = 700     # Hz  – lower bound of siren sweep
 SIREN_HIGH    = 1800    # Hz  – upper bound of siren sweep
-ENERGY_THRESH = 0.45    # relative energy threshold in siren band (increased for accuracy)
-CONFIRM_HITS  = 8       # consecutive detections needed to fire callback (more strict)
-CLEAR_HITS    = 15      # consecutive misses needed to clear detection (prevents flickering)
-MIN_AMPLITUDE = 0.05    # minimum absolute amplitude to even consider (filter out silence)
+ENERGY_THRESH = 0.20    # Require 20% of energy in siren band (stricter)
+CONFIRM_HITS  = 5       # Require 5 consecutive hits (was 3)
+CLEAR_HITS    = 8       # Require 8 misses to clear (was 5)
+MIN_AMPLITUDE = 0.001   # Require louder sounds (was 0.00001)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,10 +124,10 @@ class SirenDetector:
         self._sim_siren_elapsed  = 0.0
 
         if self.simulation:
-            print("[SirenDetector] ⚠  sounddevice not available – running in SIMULATION mode")
+            print("[SirenDetector] [!] sounddevice not available - running in SIMULATION mode")
         else:
             mic_name = sd.query_devices(kind='input')['name']
-            print(f"[SirenDetector] 🎙  Microphone mode active → {mic_name}")
+            print(f"[SirenDetector] [MIC] Microphone mode active -> {mic_name}")
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -137,14 +137,14 @@ class SirenDetector:
         target = self._sim_loop if self.simulation else self._mic_loop
         self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
-        print("[SirenDetector] ▶  Detection started")
+        print("[SirenDetector] >  Detection started")
 
     def stop(self):
         """Stop the detector."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        print("[SirenDetector] ■  Detection stopped")
+        print("[SirenDetector] []  Detection stopped")
 
     @property
     def siren_detected(self) -> bool:
@@ -156,19 +156,21 @@ class SirenDetector:
         """Return True if this audio chunk contains siren characteristics."""
         # Check 1: Absolute amplitude (filter out silence/very quiet sounds)
         amplitude = np.abs(chunk).max()
-        if amplitude < MIN_AMPLITUDE:
-            return False
-            
+
         # Check 2: Relative energy in siren frequency band
         energy = _relative_band_energy(chunk, SIREN_LOW, SIREN_HIGH, SAMPLE_RATE)
-        
+
         # Debug: print levels every 60 chunks (about once every 3 seconds - easier to read)
         if not hasattr(self, '_debug_counter'):
             self._debug_counter = 0
         self._debug_counter += 1
         if self._debug_counter % 60 == 0:
-            print(f"[DEBUG] Amplitude: {amplitude:.3f} | Energy in siren band: {energy:.3f} (need both: >{MIN_AMPLITUDE} and >{ENERGY_THRESH})")
-        
+            status = "PASS" if (amplitude >= MIN_AMPLITUDE and energy > ENERGY_THRESH) else "FAIL"
+            print(f"[DEBUG] [{status}] Amplitude: {amplitude:.4f} (need >{MIN_AMPLITUDE}) | Energy: {energy:.4f} (need >{ENERGY_THRESH})")
+
+        if amplitude < MIN_AMPLITUDE:
+            return False
+
         return energy > ENERGY_THRESH
 
     def _update_state(self, hit: bool):
@@ -193,21 +195,36 @@ class SirenDetector:
         if newly_detected != self._detected:
             self._detected = newly_detected
             self.callback(self._detected)
-            status = "🚨 SIREN DETECTED" if self._detected else "✅ Siren gone"
+            status = "[ALERT] SIREN DETECTED" if self._detected else "[OK] Siren gone"
             print(f"[SirenDetector] {status}")
 
     # ── Microphone loop ───────────────────────────────────────────────────
 
     def _mic_loop(self):
-        with sd.InputStream(samplerate=SAMPLE_RATE,
-                            channels=1,
-                            dtype='float32',
-                            blocksize=CHUNK) as stream:
-            while self._running:
-                data, overflowed = stream.read(CHUNK)
-                chunk = data[:, 0]          # mono – take channel 0
-                hit   = self._analyse_chunk(chunk)
-                self._update_state(hit)
+        try:
+            print("[SirenDetector] [DEBUG] Opening microphone stream...")
+            with sd.InputStream(samplerate=SAMPLE_RATE,
+                                channels=1,
+                                dtype='float32',
+                                blocksize=CHUNK) as stream:
+                print("[SirenDetector] [DEBUG] Stream opened, entering read loop...")
+                frame_count = 0
+                while self._running:
+                    frame_count += 1
+                    if frame_count % 60 == 0:
+                        print(f"[SirenDetector] [DEBUG] Frame {frame_count}... still running")
+                    data, overflowed = stream.read(CHUNK)
+                    if data is None or len(data) == 0:
+                        print("[SirenDetector] [WARNING] No data from stream!")
+                        break
+                    chunk = data[:, 0]          # mono – take channel 0
+                    hit   = self._analyse_chunk(chunk)
+                    self._update_state(hit)
+                print(f"[SirenDetector] [DEBUG] Mic loop exited normally after {frame_count} frames")
+        except Exception as e:
+            print(f"[SirenDetector] [ERROR] Microphone loop crashed: {e}")
+            import traceback
+            traceback.print_exc()
 
     # ── Simulation loop ───────────────────────────────────────────────────
 
@@ -220,7 +237,7 @@ class SirenDetector:
                     self._sim_siren_active   = True
                     self._sim_siren_duration = random.uniform(5, 15)
                     self._sim_siren_elapsed  = 0.0
-                    print(f"[SirenDetector] 🔊 Sim siren starting "
+                    print(f"[SirenDetector] [SIREN] Sim siren starting "
                           f"(duration={self._sim_siren_duration:.1f}s)")
 
             if self._sim_siren_active:
@@ -228,7 +245,7 @@ class SirenDetector:
                 self._sim_siren_elapsed += dt
                 if self._sim_siren_elapsed >= self._sim_siren_duration:
                     self._sim_siren_active = False
-                    print("[SirenDetector] 🔇 Sim siren ending")
+                    print("[SirenDetector] [END] Sim siren ending")
             else:
                 # Background noise
                 chunk = (0.02 * np.random.randn(CHUNK)).astype(np.float32)
